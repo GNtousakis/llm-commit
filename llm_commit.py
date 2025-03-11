@@ -35,7 +35,6 @@ def get_staged_diff(truncation_limit=4000, no_truncation=False):
         diff = diff[:truncation_limit] + "\n[Truncated]"
     return diff
 
-
 def get_style_description(commit_style):
     """
     Return the style description string based on the commit style.
@@ -108,7 +107,7 @@ def get_style_description(commit_style):
     return style_descriptions.get(commit_style, default_description)
 
 
-def build_prompt(style_description, diff, commit_style):
+def build_prompt(style_description, diff, commit_style, hint):
     """
     Build the prompt string based on the style description, diff, and constraints.
     
@@ -132,31 +131,46 @@ def build_prompt(style_description, diff, commit_style):
 
     constraints_str = "\n".join(constraints)
 
-    prompt = [
+    prompt = []
+
+    # Always include style
+    prompt.extend([
         "<commit-style>",
-        f"{style_description}",
-        "</commit-style>",
+        style_description,
+        "</commit-style>"
+    ])
+
+    if hint:
+        prompt.extend([
+            "<hint>",
+            hint,
+            "</hint>"
+        ])
+
+    prompt.extend([
         "<diff>",
         "$ git diff --staged --histogram",
-        f"{diff}",
+        diff,
         "</diff>",
         "<request>",
-        "Generate a Git commit title and commit message based on the above <diff/>.",
+        "Generate a Git commit title and commit message based on the above <diff/>"
+        + (", and using information from the provided <hint/>" if hint else "")
+        + ".",
         "</request>",
         "<constraints>",
-        f"{constraints_str}",
+        constraints_str,
         "</constraints>"
-    ]
+    ])
     
     return "\n".join(prompt)
 
-def generate_commit_message(diff, commit_style=None, model=None, max_tokens=400, temperature=0.8):
+def generate_commit_message(diff, commit_style=None, model=None, max_tokens=400, temperature=0.8, hint=None):
     import llm
     from llm.cli import get_default_model
     from llm import get_key
 
     style_description = get_style_description(commit_style)
-    prompt = build_prompt(style_description, diff, commit_style)
+    prompt = build_prompt(style_description, diff, commit_style, hint)
 
     model_obj = llm.get_model(model or get_default_model())
     if model_obj.needs_key:
@@ -220,7 +234,8 @@ def register_commands(cli):
     @click.option("--no-truncation", is_flag=True, help="Disable diff truncation. Can cause issues with large diffs")
     @click.option("--semantic", is_flag=True, help="Enforce Semantic Commit Messages format")
     @click.option("--conventional", is_flag=True, help="Enforce Conventional Commits format")
-    def commit_cmd(yes, model, max_tokens, temperature, truncation_limit, no_truncation, semantic, conventional):
+    @click.option("--hint", help="Hint message to guide the commit message generation")
+    def commit_cmd(yes, model, max_tokens, temperature, truncation_limit, no_truncation, semantic, conventional, hint):
         if semantic and conventional:
             logging.error("Cannot use both --semantic and --conventional simultaneously.")
             sys.exit(1)
@@ -235,7 +250,7 @@ def register_commands(cli):
             logging.error("Not a Git repository.")
             sys.exit(1)
         diff = get_staged_diff(truncation_limit=truncation_limit, no_truncation=no_truncation)
-        message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature)
+        message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature, hint=hint)
         if confirm_commit(message, auto_yes=yes):
             commit_changes(message)
         else:
