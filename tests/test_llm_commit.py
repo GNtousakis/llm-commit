@@ -5,7 +5,7 @@ import logging
 import subprocess
 import sys
 import pytest
-import llm_commit  # Your plugin module
+import llm_commit
 from click.testing import CliRunner
 from click import Group
 
@@ -261,3 +261,24 @@ def test_commit_cmd_no_truncation(monkeypatch):
     result = runner.invoke(cli, ["commit", "--no-truncation"])
     assert result.exit_code == 0
     assert "diff text not truncated" in result.output
+
+def test_format_commit_message_wrapping():
+    """
+    Verify that format_commit_message properly wraps the body lines to <= 72 chars.
+    """
+    long_body = (
+        "This line is definitely going to exceed seventy-two characters in length, so "
+        "it should be wrapped automatically. Additionally, we want to ensure that even "
+        "long lines with multiple words get wrapped to separate lines if they exceed "
+        "the limit, maintaining readability and following best practices."
+    )
+    raw_msg = f"Short subject\n\n{long_body}"
+    formatted = llm_commit.format_commit_message(raw_msg)
+
+    lines = formatted.split('\n')
+    # The first line is the subject, which is short
+    assert lines[0] == "Short subject", "Subject didn't match expected."
+
+    # Check wrapping for each body line
+    for line in lines[1:]:
+        assert len(line) <= 72, f"Line in the body is too long: {line}"

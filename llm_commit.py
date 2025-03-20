@@ -5,6 +5,7 @@ import logging
 import subprocess
 from pathlib import Path
 import llm
+import mdformat
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -219,6 +220,27 @@ def clean_message(message):
         message = message[3:-3].strip()
     return message
 
+def format_commit_message(msg):
+    """
+    Format the commit message according to best practices:
+      - Subject line <= 50 characters (warn if longer).
+      - Body lines wrapped at 72 characters.
+    """
+    lines = msg.split('\n')
+    if not lines:
+        return msg
+    subject = lines[0].strip()
+    body = '\n'.join(lines[1:]).strip()
+
+    if len(subject) > 50:
+        logging.warning("Subject line exceeds 50 characters.")
+
+    if body:
+        formatted_body = mdformat.text(body, options={"wrap": 72})
+        return subject + "\n\n" + formatted_body
+    else:
+        return subject
+
 @llm.hookimpl
 def register_commands(cli):
     import llm
@@ -250,7 +272,8 @@ def register_commands(cli):
             logging.error("Not a Git repository.")
             sys.exit(1)
         diff = get_staged_diff(truncation_limit=truncation_limit, no_truncation=no_truncation)
-        message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature, hint=hint)
+        raw_message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature, hint=hint)
+        message = format_commit_message(raw_message)
         if confirm_commit(message, auto_yes=yes):
             commit_changes(message)
         else:
