@@ -232,6 +232,76 @@ def test_generate_commit_message_triple_backticks_removal(monkeypatch):
     assert "```" not in message
     assert "Summary" in message
 
+def test_commit_cmd_env_style(monkeypatch):
+    runner = CliRunner()
+    
+    monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
+    monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
+    monkeypatch.setattr(
+        llm_commit, 
+        "generate_commit_message", 
+        lambda diff, commit_style, *args, **kwargs: f"Commit message with style {commit_style}"
+    )
+    monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+
+    cli = get_cli_group()
+    result = runner.invoke(cli, ["commit"], env={'LLM_COMMIT_STYLE': 'semantic'})
+    
+    assert result.exit_code == 0
+    assert "Commit message with style semantic" in result.output
+
+def test_commit_cmd_env_style_overridden(monkeypatch):
+    """
+    Test that command-line flags (--semantic or --conventional) override the
+    LLM_COMMIT_STYLE environment variable.
+    """
+    runner = CliRunner()
+    
+    monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
+    monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
+    monkeypatch.setattr(
+        llm_commit, 
+        "generate_commit_message", 
+        lambda diff, commit_style, *args, **kwargs: f"Commit message with style {commit_style}"
+    )
+    monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+
+    monkeypatch.setenv('LLM_COMMIT_STYLE', 'semantic')
+
+    cli = get_cli_group()
+    
+    result = runner.invoke(cli, ["commit", "--conventional"])
+    
+    assert result.exit_code == 0
+    assert "Commit message with style conventional" in result.output
+
+def test_commit_cmd_default_style(monkeypatch):
+    """
+    Test that the default commit style is used when neither the
+    LLM_COMMIT_STYLE environment variable nor command-line flags are set.
+    """
+    runner = CliRunner()
+    
+    monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
+    monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
+    monkeypatch.setattr(
+        llm_commit, 
+        "generate_commit_message", 
+        lambda diff, commit_style, *args, **kwargs: f"Commit message with style {commit_style}"
+    )
+    monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+
+    monkeypatch.delenv('LLM_COMMIT_STYLE', raising=False)
+
+    cli = get_cli_group()
+    result = runner.invoke(cli, ["commit"])
+    
+    assert result.exit_code == 0
+    assert "Commit message with style default" in result.output
+
 def test_commit_cmd_custom_truncation(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)

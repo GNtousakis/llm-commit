@@ -236,13 +236,18 @@ def register_commands(cli):
     @click.option("--conventional", is_flag=True, help="Enforce Conventional Commits format")
     @click.option("--hint", help="Hint message to guide the commit message generation")
     def commit_cmd(yes, model, max_tokens, temperature, truncation_limit, no_truncation, semantic, conventional, hint):
+        env_style = os.getenv('LLM_COMMIT_STYLE')
+
         if semantic and conventional:
             logging.error("Cannot use both --semantic and --conventional simultaneously.")
             sys.exit(1)
+
         if semantic:
             commit_style = "semantic"
         elif conventional:
             commit_style = "conventional"
+        elif env_style in ("semantic", "conventional"):
+            commit_style = env_style
         else:
             commit_style = "default"
 

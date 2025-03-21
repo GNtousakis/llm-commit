@@ -27,6 +27,10 @@ llm commit
 You can also customize options:
 
 ```bash
+# Enforce a specific commit style
+llm commit --semantic
+llm commit --conventional
+
 # Skip the confirmation prompt
 llm commit --yes
 
@@ -36,6 +40,14 @@ llm commit --model gpt-4 --max-tokens 150 --temperature 0.8
 # Control diff truncation behavior
 llm commit --truncation-limit 2000  # Truncate diffs longer than 2000 characters
 llm commit --no-truncation         # Never truncate diffs (use with caution on large changes)
+```
+
+You can also set defaults for options:
+
+```
+# Set commit style via environment variable
+export LLM_COMMIT_STYLE=conventional
+llm commit
 ```
 
 ## Development
