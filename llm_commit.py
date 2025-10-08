@@ -6,8 +6,6 @@ import subprocess
 from pathlib import Path
 import llm
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
 def run_git(cmd):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
