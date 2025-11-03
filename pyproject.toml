@@ -11,7 +11,8 @@ authors = [
 ]
 dependencies = [
     "click",
-    "llm"
+    "llm",
+    "mdformat"
 ]
 
 # The 'llm' entry-point tells the 'llm' CLI where to find your plugin code.
