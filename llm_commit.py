@@ -1,17 +1,13 @@
 import click
 import sys
-import os
-import logging
 import subprocess
-from pathlib import Path
 import llm
 
 def run_git(cmd):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
     except subprocess.CalledProcessError as e:
-        logging.error("Git error: %s", e)
-        sys.exit(1)
+        raise click.ClickException(f"Git error: {e.stderr.strip() or e}")
 
 def is_git_repo():
     try:
@@ -26,10 +22,9 @@ def is_git_repo():
 def get_staged_diff(truncation_limit=4000, no_truncation=False):
     diff = run_git(["git", "diff", "--cached", "--histogram"])
     if not diff:
-        logging.error("No staged changes. Use 'git add'.")
-        sys.exit(1)
+        raise click.ClickException("No staged changes. Use 'git add'.")
     if not no_truncation and len(diff) > truncation_limit:
-        logging.warning(f"Diff is large; truncating to {truncation_limit} characters.")
+        click.echo(f"Diff is large; truncating to {truncation_limit} characters.", err=True)
         diff = diff[:truncation_limit] + "\n[Truncated]"
     return diff
 
@@ -162,53 +157,58 @@ def build_prompt(style_description, diff, commit_style, hint):
     
     return "\n".join(prompt)
 
-def generate_commit_message(diff, commit_style=None, model=None, max_tokens=400, temperature=0.8, hint=None):
-    import llm
+def generate_commit_message(diff, commit_style=None, model=None, max_tokens=None, temperature=None, hint=None):
     from llm.cli import get_default_model
     from llm import get_key
 
     style_description = get_style_description(commit_style)
     prompt = build_prompt(style_description, diff, commit_style, hint)
 
-    model_obj = llm.get_model(model or get_default_model())
+    try:
+        model_obj = llm.get_model(model or get_default_model())
+    except llm.UnknownModelError as e:
+        raise click.ClickException(f"Unknown model: {e}")
+
     if model_obj.needs_key:
         model_obj.key = get_key("", model_obj.needs_key, model_obj.key_env_var)
-    response = model_obj.prompt(
-        prompt,
-        system=(
-            "You are a professional developer with more than 20 years of "
-            "experience. You're an expert at writing Git commit messages from "
-            "code diffs. Focus on highlighting the added value of changes "
-            "(meta-analysis, what could have happened without this change?), "
-            "followed by bullet points detailing key changes (avoid "
-            "paraphrasing). Use the specified commit Git style, while forbidding "
-            "other syntax markers or tags (e.g., markdown, HTML, etc.)"
-        ),
-        max_tokens=max_tokens,
-        temperature=temperature
-    )
-    return clean_message(response)
+
+    try:
+        kwargs = {}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        response = model_obj.prompt(
+            prompt,
+            system=(
+                "You are a professional developer with more than 20 years of "
+                "experience. You're an expert at writing Git commit messages from "
+                "code diffs. Focus on highlighting the added value of changes "
+                "(meta-analysis, what could have happened without this change?), "
+                "followed by bullet points detailing key changes (avoid "
+                "paraphrasing). Use the specified commit Git style, while forbidding "
+                "other syntax markers or tags (e.g., markdown, HTML, etc.)"
+            ),
+            **kwargs
+        )
+        return clean_message(response)
+    except Exception as e:
+        raise click.ClickException(f"LLM error: {e}")
 
 def commit_changes(message):
     try:
         subprocess.run(["git", "commit", "-s", "-m", message],
                        check=True, capture_output=True, text=True)
-        logging.info("Committed:\n%s", message)
+        click.echo(f"Committed:\n{message}")
     except subprocess.CalledProcessError as e:
-        logging.error("Commit failed: %s", e)
-        sys.exit(1)
+        raise click.ClickException(f"Commit failed: {e.stderr.strip() or e}")
 
 def confirm_commit(message, auto_yes=False):
     click.echo(f"Commit message:\n{message}\n")
     if auto_yes:
         return True
-    while True:
-        ans = input("Commit this message? (yes/no): ").strip().lower()
-        if ans in ("yes", "y"):
-            return True
-        elif ans in ("no", "n"):
-            return False
-        click.echo("Please enter 'yes' or 'no'.")
+    return click.confirm("Commit this message?")
 
 def clean_message(message):
     message = message.text().strip()
@@ -219,15 +219,11 @@ def clean_message(message):
 
 @llm.hookimpl
 def register_commands(cli):
-    import llm
-    from llm.cli import get_default_model
-    from llm import get_key
-
     @cli.command(name="commit")
     @click.option("-y", "--yes", is_flag=True, help="Commit without prompting")
     @click.option("--model", help="LLM model to use")
-    @click.option("--max-tokens", type=int, default=100, help="Max tokens")
-    @click.option("--temperature", type=float, default=0.3, help="Temperature")
+    @click.option("--max-tokens", type=int, help="Max tokens")
+    @click.option("--temperature", type=float, help="Temperature")
     @click.option("--truncation-limit", type=int, default=4000, help="Character limit for diff truncation")
     @click.option("--no-truncation", is_flag=True, help="Disable diff truncation. Can cause issues with large diffs")
     @click.option("--semantic", is_flag=True, help="Enforce Semantic Commit Messages format")
@@ -235,8 +231,8 @@ def register_commands(cli):
     @click.option("--hint", help="Hint message to guide the commit message generation")
     def commit_cmd(yes, model, max_tokens, temperature, truncation_limit, no_truncation, semantic, conventional, hint):
         if semantic and conventional:
-            logging.error("Cannot use both --semantic and --conventional simultaneously.")
-            sys.exit(1)
+            raise click.UsageError("Cannot use both --semantic and --conventional simultaneously.")
+
         if semantic:
             commit_style = "semantic"
         elif conventional:
@@ -245,12 +241,11 @@ def register_commands(cli):
             commit_style = "default"
 
         if not is_git_repo():
-            logging.error("Not a Git repository.")
-            sys.exit(1)
+            raise click.ClickException("Not a Git repository.")
+
         diff = get_staged_diff(truncation_limit=truncation_limit, no_truncation=no_truncation)
         message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature, hint=hint)
         if confirm_commit(message, auto_yes=yes):
             commit_changes(message)
         else:
-            logging.info("Commit aborted.")
-            sys.exit(0)
+            click.echo("Commit aborted.")
