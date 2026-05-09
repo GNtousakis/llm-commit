@@ -1,10 +1,9 @@
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pydantic._internal._config")
 
-import logging
 import subprocess
-import sys
 import pytest
+import click
 import llm_commit  # Your plugin module
 from click.testing import CliRunner
 from click import Group
@@ -28,13 +27,11 @@ def test_run_git_success(monkeypatch):
     output = llm_commit.run_git(["git", "status"])
     assert output == "dummy output"
 
-def test_run_git_failure(monkeypatch, caplog):
-    caplog.set_level(logging.ERROR)
+def test_run_git_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", dummy_run_failure)
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(click.ClickException) as exc_info:
         llm_commit.run_git(["git", "status"])
-    assert exc_info.value.code == 1
-    assert "Git error" in caplog.text
+    assert "Git error" in str(exc_info.value)
 
 # --- is_git_repo Tests ---
 def test_is_git_repo_true(monkeypatch):
@@ -53,16 +50,13 @@ def test_get_staged_diff_success(monkeypatch):
     diff = llm_commit.get_staged_diff()
     assert diff == "diff text"
 
-def test_get_staged_diff_empty(monkeypatch, caplog):
-    caplog.set_level(logging.ERROR)
+def test_get_staged_diff_empty(monkeypatch):
     monkeypatch.setattr(llm_commit, "run_git", lambda cmd: "")
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(click.ClickException) as exc_info:
         llm_commit.get_staged_diff()
-    assert exc_info.value.code == 1
-    assert "No staged changes" in caplog.text
+    assert "No staged changes" in str(exc_info.value)
 
-def test_get_staged_diff_truncation(monkeypatch, caplog):
-    caplog.set_level(logging.WARNING)
+def test_get_staged_diff_truncation(monkeypatch, capsys):
     long_diff = "a" * 5000
     monkeypatch.setattr(llm_commit, "run_git", lambda cmd: long_diff)
     
@@ -70,21 +64,68 @@ def test_get_staged_diff_truncation(monkeypatch, caplog):
     diff = llm_commit.get_staged_diff()
     expected = "a" * 4000 + "\n[Truncated]"
     assert diff == expected
-    assert "Diff is large" in caplog.text
+    captured = capsys.readouterr()
+    assert "Diff is large" in captured.err
     
     # Test custom truncation limit
-    caplog.clear()
     diff = llm_commit.get_staged_diff(truncation_limit=2000)
     expected = "a" * 2000 + "\n[Truncated]"
     assert diff == expected
-    assert "truncating to 2000 characters" in caplog.text
+    captured = capsys.readouterr()
+    assert "truncating to 2000 characters" in captured.err
 
     # Test no truncation
-    caplog.clear()
     diff = llm_commit.get_staged_diff(no_truncation=True)
     expected = "a" * 5000
     assert diff == expected
-    assert "truncating" not in caplog.text
+    captured = capsys.readouterr()
+    assert "truncating" not in captured.err
+
+# --- get_style_description Tests ---
+def test_get_style_description_semantic():
+    desc = llm_commit.get_style_description("semantic")
+    assert 'style="semantic"' in desc
+    assert "The commit message should include a one-line summary" in desc
+
+def test_get_style_description_conventional():
+    desc = llm_commit.get_style_description("conventional")
+    assert 'style="conventional"' in desc
+    assert "BREAKING CHANGE" in desc
+
+def test_get_style_description_default():
+    desc = llm_commit.get_style_description("unknown")
+    assert 'style="default"' in desc
+    desc_default = llm_commit.get_style_description(None)
+    assert 'style="default"' in desc_default
+
+# --- build_prompt Tests ---
+def test_build_prompt_basic():
+    prompt = llm_commit.build_prompt("style desc", "diff text", None, None)
+    assert "<commit-style>\nstyle desc\n</commit-style>" in prompt
+    assert "<diff>\n$ git diff --staged --histogram\ndiff text\n</diff>" in prompt
+    assert "<hint>" not in prompt
+    assert "* Carefully follow" not in prompt
+
+def test_build_prompt_with_style_and_hint():
+    prompt = llm_commit.build_prompt("style desc", "diff text", "semantic", "my hint")
+    assert "<hint>\nmy hint\n</hint>" in prompt
+    assert "* Carefully follow the <commit-style/> Commit Messages format." in prompt
+    assert "using information from the provided <hint/>" in prompt
+
+# --- clean_message Tests ---
+class DummyTextResponse:
+    def __init__(self, text):
+        self._text = text
+    def text(self):
+        return self._text
+
+def test_clean_message_basic():
+    msg = DummyTextResponse("  some message  ")
+    assert llm_commit.clean_message(msg) == "some message"
+
+def test_clean_message_backticks():
+    msg = DummyTextResponse("```\nsummary\n```")
+    assert llm_commit.clean_message(msg) == "summary"
 
 # --- generate_commit_message Tests ---
 class DummyResponse:
@@ -121,42 +162,31 @@ def dummy_run_commit_success(cmd, capture_output, text, check):
 def dummy_run_commit_failure(cmd, capture_output, text, check):
     raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output="", stderr="commit error")
 
-def test_commit_changes_success(monkeypatch, caplog):
-    caplog.set_level(logging.INFO)
+def test_commit_changes_success(monkeypatch, capsys):
     monkeypatch.setattr(subprocess, "run", dummy_run_commit_success)
     llm_commit.commit_changes("Test message")
-    # Check for "Committed:" which matches the logged output.
-    assert "Committed:" in caplog.text
+    captured = capsys.readouterr()
+    assert "Committed:" in captured.out
 
-def test_commit_changes_failure(monkeypatch, caplog):
-    caplog.set_level(logging.ERROR)
+def test_commit_changes_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", dummy_run_commit_failure)
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(click.ClickException) as exc_info:
         llm_commit.commit_changes("Test message")
-    assert exc_info.value.code == 1
-    assert "Commit failed" in caplog.text
+    assert "Commit failed" in str(exc_info.value)
 
 # --- confirm_commit Tests ---
 def test_confirm_commit_yes(monkeypatch):
-    inputs = iter(["yes"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    monkeypatch.setattr(click, "confirm", lambda prompt: True)
     result = llm_commit.confirm_commit("Test message", auto_yes=False)
     assert result is True
 
 def test_confirm_commit_no(monkeypatch):
-    inputs = iter(["no"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    monkeypatch.setattr(click, "confirm", lambda prompt: False)
     result = llm_commit.confirm_commit("Test message", auto_yes=False)
     assert result is False
 
 def test_confirm_commit_auto_yes():
     result = llm_commit.confirm_commit("Test message", auto_yes=True)
-    assert result is True
-
-def test_confirm_commit_invalid_then_yes(monkeypatch):
-    inputs = iter(["blah", "yes"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
-    result = llm_commit.confirm_commit("Test message", auto_yes=False)
     assert result is True
 
 # --- CLI Tests ---
@@ -172,9 +202,8 @@ def test_commit_cmd_full_flow_yes(monkeypatch):
     monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
     monkeypatch.setattr(llm_commit, "generate_commit_message", lambda *args, **kwargs: "Test message")
     monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
-    monkeypatch.setattr("builtins.input", lambda _: "yes")
     cli = get_cli_group()
-    result = runner.invoke(cli, ["commit", "--model", "test-model", "--max-tokens", "50", "--temperature", "0.5"])
+    result = runner.invoke(cli, ["commit", "--model", "test-model", "--max-tokens", "50", "--temperature", "0.5"], input="y\n")
     assert result.exit_code == 0
     assert "Commit message:" in result.output
     assert "Test message" in result.output
@@ -191,27 +220,24 @@ def test_commit_cmd_auto_yes(monkeypatch):
     assert "Commit message:" in result.output
     assert "Test message" in result.output
 
-def test_commit_cmd_no(monkeypatch, caplog):
-    caplog.set_level(logging.INFO)
+def test_commit_cmd_no(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
     monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
     monkeypatch.setattr(llm_commit, "generate_commit_message", lambda *args, **kwargs: "Test message")
     monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
-    monkeypatch.setattr("builtins.input", lambda _: "no")
     cli = get_cli_group()
-    result = runner.invoke(cli, ["commit"])
+    result = runner.invoke(cli, ["commit"], input="n\n")
     assert result.exit_code == 0
-    assert "Commit aborted" in caplog.text
+    assert "Commit aborted" in result.output
 
-def test_commit_cmd_not_git_repo(monkeypatch, caplog):
-    caplog.set_level(logging.ERROR)
+def test_commit_cmd_not_git_repo(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr(llm_commit, "is_git_repo", lambda: False)
     cli = get_cli_group()
     result = runner.invoke(cli, ["commit"])
     assert result.exit_code == 1
-    assert "Not a Git repository" in caplog.text
+    assert "Not a Git repository" in result.output
 
 def test_generate_commit_message_triple_backticks_removal(monkeypatch):
     # Dummy response that returns a commit message wrapped in triple backticks.
@@ -232,6 +258,47 @@ def test_generate_commit_message_triple_backticks_removal(monkeypatch):
     assert "```" not in message
     assert "Summary" in message
 
+def test_generate_commit_message_unknown_model(monkeypatch):
+    def raise_unknown_model(*args, **kwargs):
+        raise llm_commit.llm.UnknownModelError("bad-model")
+    monkeypatch.setattr(llm_commit.llm, "get_model", raise_unknown_model)
+    with pytest.raises(click.ClickException) as exc_info:
+        llm_commit.generate_commit_message("diff")
+    assert "Unknown model" in str(exc_info.value)
+
+def test_generate_commit_message_llm_error(monkeypatch):
+    class ErrorModel:
+        needs_key = False
+        def prompt(self, *args, **kwargs):
+            raise Exception("API failure")
+    monkeypatch.setattr(llm_commit.llm, "get_model", lambda model: ErrorModel())
+    with pytest.raises(click.ClickException) as exc_info:
+        llm_commit.generate_commit_message("diff")
+    assert "LLM error" in str(exc_info.value)
+
+def test_commit_cmd_semantic_conventional_conflict(monkeypatch):
+    runner = CliRunner()
+    cli = get_cli_group()
+    result = runner.invoke(cli, ["commit", "--semantic", "--conventional"])
+    assert result.exit_code != 0
+    assert "Cannot use both --semantic and --conventional simultaneously" in result.output
+
+def test_commit_cmd_hint(monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
+    monkeypatch.setattr(llm_commit, "get_staged_diff", lambda *args, **kwargs: "diff text")
+
+    def mock_generate(diff, commit_style, model, max_tokens, temperature, hint):
+        return f"Message with hint: {hint}"
+
+    monkeypatch.setattr(llm_commit, "generate_commit_message", mock_generate)
+    monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
+
+    cli = get_cli_group()
+    result = runner.invoke(cli, ["commit", "--hint", "test-hint"], input="y\n")
+    assert result.exit_code == 0
+    assert "Message with hint: test-hint" in result.output
+
 def test_commit_cmd_custom_truncation(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr(llm_commit, "is_git_repo", lambda: True)
@@ -241,9 +308,8 @@ def test_commit_cmd_custom_truncation(monkeypatch):
     monkeypatch.setattr(llm_commit, "get_staged_diff", mock_get_staged_diff)
     monkeypatch.setattr(llm_commit, "generate_commit_message", lambda diff, *args, **kwargs: f"Test message\n\n{diff}")
     monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
-    monkeypatch.setattr("builtins.input", lambda _: "yes")
     cli = get_cli_group()
-    result = runner.invoke(cli, ["commit", "--truncation-limit", "2000"])
+    result = runner.invoke(cli, ["commit", "--truncation-limit", "2000"], input="y\n")
     assert result.exit_code == 0
     assert "diff text truncated at 2000" in result.output
 
@@ -256,8 +322,7 @@ def test_commit_cmd_no_truncation(monkeypatch):
     monkeypatch.setattr(llm_commit, "get_staged_diff", mock_get_staged_diff)
     monkeypatch.setattr(llm_commit, "generate_commit_message", lambda diff, *args, **kwargs: f"Test message\n\n{diff}")
     monkeypatch.setattr(llm_commit, "commit_changes", lambda msg: None)
-    monkeypatch.setattr("builtins.input", lambda _: "yes")
     cli = get_cli_group()
-    result = runner.invoke(cli, ["commit", "--no-truncation"])
+    result = runner.invoke(cli, ["commit", "--no-truncation"], input="y\n")
     assert result.exit_code == 0
     assert "diff text not truncated" in result.output
