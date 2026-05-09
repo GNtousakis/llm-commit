@@ -134,13 +134,13 @@ class DummyResponse:
 
 class DummyModel:
     needs_key = False
-    def prompt(self, prompt, system, max_tokens, temperature):
+    def prompt(self, prompt, system, **kwargs):
         return DummyResponse()
 
 class DummyModelWithKey:
     needs_key = True
     key_env_var = "OPENAI_API_KEY"
-    def prompt(self, prompt, system, max_tokens, temperature):
+    def prompt(self, prompt, system, **kwargs):
         # For testing, ensure our prompt mentions a one-line summary if desired.
         assert "concise and professional Git commit message" in prompt
         return DummyResponse()
@@ -246,7 +246,7 @@ def test_generate_commit_message_triple_backticks_removal(monkeypatch):
             return "```\nSummary\n- Change 1\n- Change 2\n```"
     class DummyModelWithBackticks:
         needs_key = False
-        def prompt(self, prompt, system, max_tokens, temperature):
+        def prompt(self, prompt, system, **kwargs):
             return DummyResponseWithBackticks()
 
     # Monkey-patch the llm.get_model to return our dummy model.

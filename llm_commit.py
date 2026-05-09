@@ -173,6 +173,12 @@ def generate_commit_message(diff, commit_style=None, model=None, max_tokens=None
         model_obj.key = get_key("", model_obj.needs_key, model_obj.key_env_var)
 
     try:
+        kwargs = {}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
         response = model_obj.prompt(
             prompt,
             system=(
@@ -184,8 +190,7 @@ def generate_commit_message(diff, commit_style=None, model=None, max_tokens=None
                 "paraphrasing). Use the specified commit Git style, while forbidding "
                 "other syntax markers or tags (e.g., markdown, HTML, etc.)"
             ),
-            max_tokens=max_tokens,
-            temperature=temperature
+            **kwargs
         )
         return clean_message(response)
     except Exception as e:
