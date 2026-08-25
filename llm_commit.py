@@ -1,13 +1,16 @@
 import click
-import sys
 import subprocess
 import llm
 
-def run_git(cmd):
+DIFF_CMD = ["git", "diff", "--cached", "--histogram"]
+
+def run_git(cmd, error_prefix="Git error"):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+    except FileNotFoundError:
+        raise click.ClickException("Git not found. Please ensure Git is installed and on your PATH.")
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Git error: {e.stderr.strip() or e}")
+        raise click.ClickException(f"{error_prefix}: {e.stderr.strip() or e}")
 
 def is_git_repo():
     try:
@@ -16,11 +19,18 @@ def is_git_repo():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
         )
         return True
+    except FileNotFoundError:
+        raise click.ClickException("Git not found. Please ensure Git is installed and on your PATH.")
     except subprocess.CalledProcessError:
         return False
 
+def get_current_staged_diff():
+    return run_git(DIFF_CMD)
+
 def get_staged_diff(truncation_limit=4000, no_truncation=False):
-    diff = run_git(["git", "diff", "--cached", "--histogram"])
+    if truncation_limit < 1:
+        raise click.ClickException("truncation-limit must be a positive integer.")
+    diff = run_git(DIFF_CMD)
     if not diff:
         raise click.ClickException("No staged changes. Use 'git add'.")
     if not no_truncation and len(diff) > truncation_limit:
@@ -100,15 +110,31 @@ def get_style_description(commit_style):
     return style_descriptions.get(commit_style, default_description)
 
 
+_PROMPT_TAGS = ("commit-style", "hint", "diff", "request", "constraints")
+
+def escape_prompt_tags(text):
+    """
+    Neutralize occurrences of this prompt's own structural tags (e.g. </diff>)
+    inside untrusted content, so diff or hint text can't break out of its tag
+    and inject new instructions into the prompt.
+    """
+    for tag in _PROMPT_TAGS:
+        text = text.replace(f"</{tag}>", f"&lt;/{tag}&gt;").replace(f"<{tag}>", f"&lt;{tag}&gt;")
+    return text
+
 def build_prompt(style_description, diff, commit_style, hint):
     """
     Build the prompt string based on the style description, diff, and constraints.
-    
+
     :param style_description: The description of the commit message style.
     :param diff: The code diff to be included in the prompt.
     :param commit_style: Optional commit style name.
     :return: A formatted string containing the entire prompt.
     """
+    diff = escape_prompt_tags(diff)
+    if hint:
+        hint = escape_prompt_tags(hint)
+
     constraints = [
         "* Ensure the commit message is concise and follows professional standards.",
         "* Ensure the subject is in present tense and concise.",
@@ -197,12 +223,8 @@ def generate_commit_message(diff, commit_style=None, model=None, max_tokens=None
         raise click.ClickException(f"LLM error: {e}")
 
 def commit_changes(message):
-    try:
-        subprocess.run(["git", "commit", "-s", "-m", message],
-                       check=True, capture_output=True, text=True)
-        click.echo(f"Committed:\n{message}")
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Commit failed: {e.stderr.strip() or e}")
+    run_git(["git", "commit", "-s", "-m", message], error_prefix="Commit failed")
+    click.echo(f"Committed:\n{message}")
 
 def confirm_commit(message, auto_yes=False):
     click.echo(f"Commit message:\n{message}\n")
@@ -214,7 +236,12 @@ def clean_message(message):
     message = message.text().strip()
     # Remove triple backticks at the beginning and end, if present
     if message.startswith("```") and message.endswith("```"):
-        message = message[3:-3].strip()
+        message = message[3:-3]
+        # Drop a leading fence language tag (e.g. ```markdown) left on its own line
+        first_line, sep, rest = message.partition("\n")
+        if sep and first_line.strip() and " " not in first_line.strip():
+            message = rest
+        message = message.strip()
     return message
 
 @llm.hookimpl
@@ -224,7 +251,7 @@ def register_commands(cli):
     @click.option("--model", help="LLM model to use")
     @click.option("--max-tokens", type=int, help="Max tokens")
     @click.option("--temperature", type=float, help="Temperature")
-    @click.option("--truncation-limit", type=int, default=4000, help="Character limit for diff truncation")
+    @click.option("--truncation-limit", type=click.IntRange(min=1), default=4000, help="Character limit for diff truncation")
     @click.option("--no-truncation", is_flag=True, help="Disable diff truncation. Can cause issues with large diffs")
     @click.option("--semantic", is_flag=True, help="Enforce Semantic Commit Messages format")
     @click.option("--conventional", is_flag=True, help="Enforce Conventional Commits format")
@@ -243,9 +270,14 @@ def register_commands(cli):
         if not is_git_repo():
             raise click.ClickException("Not a Git repository.")
 
+        baseline_diff = get_current_staged_diff()
         diff = get_staged_diff(truncation_limit=truncation_limit, no_truncation=no_truncation)
         message = generate_commit_message(diff, commit_style, model=model, max_tokens=max_tokens, temperature=temperature, hint=hint)
+        if not message.strip():
+            raise click.ClickException("Generated commit message was empty.")
         if confirm_commit(message, auto_yes=yes):
+            if get_current_staged_diff() != baseline_diff:
+                raise click.ClickException("Staged changes changed since the commit message was generated. Aborting.")
             commit_changes(message)
         else:
             click.echo("Commit aborted.")
